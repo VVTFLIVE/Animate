@@ -1,7 +1,10 @@
+import logging
 import os
 import re
 import uuid
 import shutil
+
+logger = logging.getLogger(__name__)
 
 
 def extract_first_number(s: str):
@@ -47,7 +50,12 @@ def sort_by(items, base_path=".", method=None):
 
 
 def _safe_list_files(directory: str):
-    return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    try:
+        return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    except PermissionError:
+        raise PermissionError(f"Permission denied when listing files in '{directory}'.")
+    except OSError as exc:
+        raise OSError(f"Cannot list files in '{directory}': {exc}") from exc
 
 
 def _format_name(index: int, digits: int, prefix: str, ext: str):
@@ -177,24 +185,57 @@ class RenameFilesInDir:
                     return t
 
         # phase1 -> temp
-        for fname in files:
-            old_path = os.path.join(directory, fname)
-            tmp = _make_temp_name(fname)
-            tmp_path = os.path.join(directory, tmp)
+        try:
+            for fname in files:
+                old_path = os.path.join(directory, fname)
+                tmp = _make_temp_name(fname)
+                tmp_path = os.path.join(directory, tmp)
 
-            os.rename(old_path, tmp_path)
-            temp_map.append((tmp, fname))
+                os.rename(old_path, tmp_path)
+                temp_map.append((tmp, fname))
+        except OSError as exc:
+            # Rollback: restore already-renamed files to their originals
+            for tmp, original in reversed(temp_map):
+                try:
+                    os.rename(
+                        os.path.join(directory, tmp),
+                        os.path.join(directory, original),
+                    )
+                except OSError as rb_exc:
+                    logger.error(
+                        "Rollback failed for '%s' -> '%s': %s",
+                        tmp, original, rb_exc,
+                    )
+            raise OSError(
+                f"Inplace rename failed during temp-rename phase: {exc}. "
+                f"Attempted rollback of {len(temp_map)} file(s)."
+            ) from exc
 
         # phase2 -> final
-        for tmp, original_name in temp_map:
-            tmp_path = os.path.join(directory, tmp)
-            _, ext = os.path.splitext(original_name)
+        try:
+            for tmp, original_name in temp_map:
+                tmp_path = os.path.join(directory, tmp)
+                _, ext = os.path.splitext(original_name)
 
-            next_idx = _find_next_free_index(directory, digits, prefix, start_from=1)
-            new_name = _format_name(next_idx, digits, prefix, ext)
+                next_idx = _find_next_free_index(directory, digits, prefix, start_from=1)
+                new_name = _format_name(next_idx, digits, prefix, ext)
 
-            new_path = os.path.join(directory, new_name)
-            os.rename(tmp_path, new_path)
-            count += 1
+                new_path = os.path.join(directory, new_name)
+                os.rename(tmp_path, new_path)
+                count += 1
+        except OSError as exc:
+            remaining = [
+                tmp for tmp, _ in temp_map
+                if os.path.exists(os.path.join(directory, tmp))
+            ]
+            logger.error(
+                "Inplace rename failed during final-rename phase: %s. "
+                "%d temp file(s) may remain: %s",
+                exc, len(remaining), remaining,
+            )
+            raise OSError(
+                f"Inplace rename failed during final-rename phase: {exc}. "
+                f"{len(remaining)} temp file(s) remain in '{directory}'."
+            ) from exc
 
         return (count,)
