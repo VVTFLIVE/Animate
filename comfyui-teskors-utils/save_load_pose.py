@@ -1,8 +1,11 @@
+import logging
 import os
 import time
 import pickle
 import glob
 import folder_paths
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_output_dir():
@@ -93,8 +96,21 @@ class TSSavePoseDataAsPickle:
 
         abs_path = _make_unique_path(os.path.join(out_dir, filename))
 
-        with open(abs_path, "wb") as f:
-            pickle.dump(pose_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            with open(abs_path, "wb") as f:
+                pickle.dump(pose_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as exc:
+            # Remove partially-written file so it doesn't look like valid data
+            if os.path.exists(abs_path):
+                try:
+                    os.remove(abs_path)
+                except OSError as rm_exc:
+                    logger.error(
+                        "Could not remove partial file '%s': %s", abs_path, rm_exc,
+                    )
+            raise RuntimeError(
+                f"Failed to save pose data to '{abs_path}': {exc}"
+            ) from exc
 
         return (abs_path,)
 
@@ -122,7 +138,12 @@ class TSLoadPoseDataPickle:
         if not os.path.isfile(abs_path):
             raise ValueError(f"TS PoseData Pickle: File not found: {abs_path}")
 
-        with open(abs_path, "rb") as f:
-            pose_data = pickle.load(f)
+        try:
+            with open(abs_path, "rb") as f:
+                pose_data = pickle.load(f)
+        except (pickle.UnpicklingError, EOFError, ValueError) as exc:
+            raise RuntimeError(
+                f"TS PoseData Pickle: Failed to deserialize '{abs_path}': {exc}"
+            ) from exc
 
         return (pose_data,)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import pickle
 import threading
@@ -10,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import cv2
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -160,6 +163,11 @@ class _SafeUnpickler(pickle.Unpickler):
         try:
             return super().find_class(module, name)
         except Exception:
+            logger.warning(
+                "Could not resolve class %s.%s; substituting dummy object. "
+                "Pose data attributes may be incomplete.",
+                module, name,
+            )
             return _PoseDummyObj
 
 
@@ -375,8 +383,11 @@ def _extract_canvas_wh(data: Any, default_w: int, default_h: int) -> Tuple[int, 
                     w = int(fr["canvas_width"])
                     h = int(fr["canvas_height"])
                     break
-                except Exception:
-                    pass
+                except (ValueError, TypeError) as exc:
+                    logger.warning(
+                        "Non-numeric canvas dimensions (width=%r, height=%r): %s",
+                        fr.get("canvas_width"), fr.get("canvas_height"), exc,
+                    )
     return w, h
 
 
@@ -504,7 +515,7 @@ def _sum_conf(arr: Optional[List[float]], sample_step: int = 1) -> float:
     for i in range(2, len(arr), 3 * sample_step):
         try:
             c = float(arr[i])
-        except Exception:
+        except (ValueError, TypeError, IndexError):
             c = 0.0
         if c > 0:
             s += c

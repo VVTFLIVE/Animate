@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import shutil
@@ -8,13 +9,16 @@ from collections.abc import Mapping
 import torch
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 # OpenCV for video decoding
 try:
     import cv2
 
     _has_cv2 = True
-except Exception:
+except ImportError as _cv2_err:
     _has_cv2 = False
+    logger.warning("OpenCV (cv2) could not be imported: %s", _cv2_err)
 
 
 # =========================
@@ -71,6 +75,11 @@ def get_audio(file, start_time=0, duration=0):
     else:
         ar = 44100
         ac = 2
+        logger.warning(
+            "Could not parse audio metadata from ffmpeg stderr for '%s'; "
+            "falling back to %d Hz / %d ch.",
+            file, ar, ac,
+        )
 
     # reshape как в utils: (-1, channels) -> (channels, samples) -> (1, channels, samples)
     if audio.numel() == 0:
@@ -91,7 +100,12 @@ class LazyAudioMap(Mapping):
 
     def _ensure(self):
         if self._dict is None:
-            self._dict = get_audio(self.file, self.start_time, self.duration)
+            try:
+                self._dict = get_audio(self.file, self.start_time, self.duration)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to lazily extract audio from '{self.file}': {exc}"
+                ) from exc
 
     def __getitem__(self, key):
         self._ensure()
@@ -329,23 +343,41 @@ class LoadVideoBatchListFromDir:
 
         images_list = []
         audios_list = []
+        skipped = []
 
         for fname in files:
             path = os.path.join(directory, fname)
 
-            vid, source_fps, loaded_fps, loaded_duration, start_time = _read_frames_vhs_like(
-                path,
-                force_rate=force_rate,
-                custom_width=width,
-                custom_height=height,
-                downscale_ratio=8,
-                frame_load_cap=frame_load_cap,
-            )
+            try:
+                vid, source_fps, loaded_fps, loaded_duration, start_time = _read_frames_vhs_like(
+                    path,
+                    force_rate=force_rate,
+                    custom_width=width,
+                    custom_height=height,
+                    downscale_ratio=8,
+                    frame_load_cap=frame_load_cap,
+                )
+            except Exception as exc:
+                logger.warning("Skipping '%s': %s", fname, exc)
+                skipped.append(fname)
+                continue
 
             images_list.append(vid)
 
             # duration based on loaded frames/time
             audio = lazy_get_audio(path, start_time, loaded_duration)
             audios_list.append(audio)
+
+        if not images_list:
+            raise RuntimeError(
+                f"All {len(skipped)} video(s) in '{directory}' failed to load. "
+                f"Skipped: {skipped}"
+            )
+
+        if skipped:
+            logger.warning(
+                "Loaded %d video(s), skipped %d: %s",
+                len(images_list), len(skipped), skipped,
+            )
 
         return (images_list, audios_list, len(images_list))
