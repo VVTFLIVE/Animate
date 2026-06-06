@@ -139,11 +139,21 @@ class _PoseDummyObj:
             self.__dict__["_state"] = state
 
 
+_SAFE_MODULES = frozenset({
+    "numpy", "numpy.core", "numpy.core.multiarray", "numpy.core.numeric",
+    "numpy._core", "numpy._core.multiarray", "numpy._core.numeric",
+    "numpy._globals",
+    "torch", "torch._utils",
+    "collections", "builtins", "_codecs",
+})
+
+
 class _SafeUnpickler(pickle.Unpickler):
     """
-    Безопасно грузим PKL из ComfyUI окружения:
-    - ремап numpy._core -> numpy.core
-    - неизвестные классы (WanAnimatePreprocess.*) превращаем в простые объекты с __dict__
+    Restricted unpickler for ComfyUI pose data:
+    - Remaps numpy._core -> numpy.core (version compat)
+    - Known pose metadata classes -> _PoseDummyObj (safe container)
+    - Only allows modules in _SAFE_MODULES; rejects everything else
     """
 
     def find_class(self, module, name):
@@ -157,10 +167,14 @@ class _SafeUnpickler(pickle.Unpickler):
         if name in {"AAPoseMeta"}:
             return _PoseDummyObj
 
-        try:
+        # Allow known-safe modules
+        if module in _SAFE_MODULES:
             return super().find_class(module, name)
-        except Exception:
-            return _PoseDummyObj
+
+        # Reject unknown modules instead of silently allowing them
+        raise pickle.UnpicklingError(
+            f"Restricted unpickler refused to load: {module}.{name}"
+        )
 
 
 def _load_pose_data_pkl(path: str) -> Any:
