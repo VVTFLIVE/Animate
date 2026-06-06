@@ -5,6 +5,76 @@ import glob
 import folder_paths
 
 
+# ---------------------------------------------------------------------------
+# Restricted unpickler — prevents arbitrary code execution from .pkl files
+# ---------------------------------------------------------------------------
+_ALLOWED_MODULES = frozenset({
+    "numpy", "numpy.core", "numpy.core.multiarray", "numpy.core.numeric",
+    "numpy._core", "numpy._core.multiarray", "numpy._core.numeric",
+    "numpy._globals",
+    "torch", "torch._utils",
+    "collections", "builtins", "_codecs",
+})
+
+_ALLOWED_GLOBALS = frozenset({
+    ("numpy", "ndarray"), ("numpy", "dtype"),
+    ("numpy.core.multiarray", "_reconstruct"),
+    ("numpy.core.multiarray", "scalar"),
+    ("numpy.core.numeric", "_frombuffer"),
+    ("numpy._core.multiarray", "_reconstruct"),
+    ("numpy._core.multiarray", "scalar"),
+    ("numpy._core.numeric", "_frombuffer"),
+    ("torch", "FloatStorage"), ("torch", "LongStorage"),
+    ("torch", "IntStorage"), ("torch", "DoubleStorage"),
+    ("torch", "HalfStorage"), ("torch", "BFloat16Storage"),
+    ("torch._utils", "_rebuild_tensor_v2"),
+    ("collections", "OrderedDict"),
+    ("builtins", "set"), ("builtins", "frozenset"),
+    ("_codecs", "encode"),
+})
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Only allow known-safe numpy/torch types to be deserialized."""
+
+    def find_class(self, module: str, name: str):
+        # Remap numpy._core -> numpy.core (version compat)
+        if module.startswith("numpy._core"):
+            module = module.replace("numpy._core", "numpy.core", 1)
+        if module.startswith("numpy._globals"):
+            module = module.replace("numpy._globals", "numpy", 1)
+
+        if (module, name) in _ALLOWED_GLOBALS:
+            return super().find_class(module, name)
+
+        # Allow any attribute access within allowed modules for dtype etc.
+        if module in _ALLOWED_MODULES:
+            return super().find_class(module, name)
+
+        raise pickle.UnpicklingError(
+            f"Restricted unpickler refused to load: {module}.{name}"
+        )
+
+
+def _safe_pickle_load(f):
+    """Load a pickle file with restricted deserialization."""
+    return _RestrictedUnpickler(f).load()
+
+
+# ---------------------------------------------------------------------------
+# Path safety helpers
+# ---------------------------------------------------------------------------
+def _validate_path_within(path: str, allowed_root: str) -> str:
+    """Resolve path and ensure it stays within allowed_root. Raises ValueError on escape."""
+    resolved = os.path.realpath(path)
+    root = os.path.realpath(allowed_root)
+    if not resolved.startswith(root + os.sep) and resolved != root:
+        raise ValueError(
+            f"Path traversal blocked: '{path}' resolves outside allowed directory."
+        )
+    return resolved
+
+
 def _ensure_output_dir():
     out_dir = folder_paths.get_output_directory()
     os.makedirs(out_dir, exist_ok=True)
@@ -35,7 +105,8 @@ def _list_all_pkl_under_input():
 
 def _abs_from_input(rel_path: str) -> str:
     inp = folder_paths.get_input_directory()
-    return os.path.join(inp, rel_path).replace("\\", "/")
+    candidate = os.path.join(inp, rel_path).replace("\\", "/")
+    return _validate_path_within(candidate, inp)
 
 
 def _make_unique_path(base_path: str) -> str:
@@ -91,7 +162,10 @@ class TSSavePoseDataAsPickle:
         if not filename.lower().endswith((".pkl", ".pickle")):
             filename += ".pkl"
 
-        abs_path = _make_unique_path(os.path.join(out_dir, filename))
+        # Block path traversal in user-provided filename
+        candidate = os.path.join(out_dir, filename)
+        _validate_path_within(candidate, out_dir)
+        abs_path = _make_unique_path(candidate)
 
         with open(abs_path, "wb") as f:
             pickle.dump(pose_data, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -123,6 +197,6 @@ class TSLoadPoseDataPickle:
             raise ValueError(f"TS PoseData Pickle: File not found: {abs_path}")
 
         with open(abs_path, "rb") as f:
-            pose_data = pickle.load(f)
+            pose_data = _safe_pickle_load(f)
 
         return (pose_data,)
